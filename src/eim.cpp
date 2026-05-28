@@ -401,6 +401,7 @@ void ChewingEngine::doReset(InputContextEvent &event) {
     chewing_clean_preedit_buf(ctx);
     chewing_clean_bopomofo_buf(ctx);
     chewing_Reset(ctx);
+    populateConfig();
     updateUI(event.inputContext());
 }
 
