@@ -172,6 +172,18 @@ FCITX_CONFIGURATION(
                                  _("Automatically shift cursor"), false};
     Option<bool> EasySymbolInput{this, "EasySymbolInput",
                                  _("Enable easy symbol"), false};
+    Option<bool> AsciiPunctuation{this, "AsciiPunctuation",
+                                  _("Use ASCII punctuation"), false};
+    Option<bool> ShiftLetterAsAscii{this, "ShiftLetterAsAscii",
+                                    _("Use ASCII letters with Shift"), false};
+    Option<bool> SpaceCommitsCandidate{this, "SpaceCommitsCandidate",
+                                       _("Commit first candidate with Space"),
+                                       false};
+    Option<bool> EnterCommitsCandidate{this, "EnterCommitsCandidate",
+                                       _("Commit first candidate with Enter"),
+                                       false};
+    Option<bool> FuzzyToneInput{this, "FuzzyToneInput",
+                                _("Use fuzzy tone input"), false};
     Option<bool> SpaceAsSelection{this, "SpaceAsSelection",
                                   _("Space as selection key"), true};
     ChewingLayoutOption Layout{this, "Layout", _("Keyboard Layout"),
@@ -213,6 +225,7 @@ public:
 
 private:
     bool handleCandidateKeyEvent(const KeyEvent &keyEvent) const;
+    void commitLiteralAndReset(KeyEvent &keyEvent, char literal);
     void updatePreeditImpl(InputContext *ic);
 
     FCITX_ADDON_DEPENDENCY_LOADER(chttrans, instance_->addonManager());

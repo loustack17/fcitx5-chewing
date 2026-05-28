@@ -30,6 +30,7 @@
 #include <fcitx/userinterfacemanager.h>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -44,6 +45,7 @@ namespace fcitx {
 namespace {
 
 constexpr int CHEWING_MAX_LEN = 18;
+constexpr char FUZZY_TONE_INPUT_KEY[] = "chewing.fuzzy_tone_input";
 
 constexpr auto builtin_selectkeys = std::to_array<std::string_view>({
     "1234567890",
@@ -72,6 +74,51 @@ DEFINE_SAFE_CHEWING_STRING_GETTER(aux);
 DEFINE_SAFE_CHEWING_STRING_GETTER(buffer);
 DEFINE_SAFE_CHEWING_STRING_GETTER(bopomofo);
 DEFINE_SAFE_CHEWING_STRING_GETTER(commit);
+
+bool hasControlLikeModifier(const Key &key) {
+    return key.states().test(KeyState::Ctrl) ||
+           key.states().test(KeyState::Alt) ||
+           key.states().test(KeyState::Super);
+}
+
+bool isAsciiPunctuation(uint32_t unicode) {
+    return (unicode >= 0x21 && unicode <= 0x2f) ||
+           (unicode >= 0x3a && unicode <= 0x40) ||
+           (unicode >= 0x5b && unicode <= 0x60) ||
+           (unicode >= 0x7b && unicode <= 0x7e);
+}
+
+std::optional<char> literalCharForKey(const ChewingConfig &config,
+                                      const KeyEvent &keyEvent) {
+    const auto key = keyEvent.key();
+    if (!key.isSimple()) {
+        return std::nullopt;
+    }
+
+    const bool shiftPressed = keyEvent.rawKey().states().test(KeyState::Shift);
+    if (*config.ShiftLetterAsAscii && shiftPressed) {
+        if (key.isUAZ()) {
+            return static_cast<char>(Key::keySymToUnicode(key.sym()) - 'A' +
+                                     'a');
+        }
+        if (key.isLAZ()) {
+            return static_cast<char>(Key::keySymToUnicode(key.sym()));
+        }
+    }
+
+    const auto unicode = Key::keySymToUnicode(key.sym());
+    if (*config.AsciiPunctuation && !hasControlLikeModifier(key) &&
+        isAsciiPunctuation(unicode)) {
+        return static_cast<char>(unicode);
+    }
+
+    return std::nullopt;
+}
+
+bool useFuzzyToneLayout(const ChewingConfig &config) {
+    return *config.FuzzyToneInput && (*config.Layout == ChewingLayout::Hsu ||
+                                      *config.Layout == ChewingLayout::ETen26);
+}
 
 class ChewingCandidateWord : public CandidateWord {
 public:
@@ -339,6 +386,8 @@ void ChewingEngine::populateConfig() {
     chewing_set_autoShiftCur(ctx, *config_.AutoShiftCursor ? 1 : 0);
     chewing_set_spaceAsSelection(ctx, *config_.SpaceAsSelection ? 1 : 0);
     chewing_set_escCleanAllBuf(ctx, 1);
+    chewing_config_set_int(ctx, FUZZY_TONE_INPUT_KEY,
+                           useFuzzyToneLayout(config_) ? 1 : 0);
 }
 
 void ChewingEngine::reset(const InputMethodEntry & /*entry*/,
@@ -441,17 +490,36 @@ bool ChewingEngine::handleCandidateKeyEvent(const KeyEvent &keyEvent) const {
         return true;
     }
     if (keyEvent.key().check(FcitxKey_Return)) {
-        if (int index = candidateList->cursorIndex();
-            index >= 0 && index < candidateList->size()) {
+        int index =
+            *config_.EnterCommitsCandidate ? 0 : candidateList->cursorIndex();
+        if (index >= 0 && index < candidateList->size()) {
             candidateList->candidate(index).select(ic);
         }
         return true;
     }
     if (keyEvent.key().check(FcitxKey_space)) {
-        candidateList->next();
+        if (*config_.SpaceCommitsCandidate && !candidateList->empty()) {
+            candidateList->candidate(0).select(ic);
+        } else {
+            candidateList->next();
+        }
         return true;
     }
     return false;
+}
+
+void ChewingEngine::commitLiteralAndReset(KeyEvent &keyEvent, char literal) {
+    auto *ctx = context_.get();
+    auto *ic = keyEvent.inputContext();
+    if (chewing_buffer_Check(ctx) || chewing_bopomofo_Check(ctx)) {
+        chewing_commit_preedit_buf(ctx);
+        if (chewing_commit_Check(ctx)) {
+            ic->commitString(safeChewing_commit_String(ctx));
+        }
+    }
+    ic->commitString(std::string(1, literal));
+    keyEvent.filterAndAccept();
+    doReset(keyEvent);
 }
 
 void ChewingEngine::keyEvent(const InputMethodEntry &entry,
@@ -470,9 +538,19 @@ void ChewingEngine::keyEvent(const InputMethodEntry &entry,
         return;
     }
 
+    if (auto literal = literalCharForKey(config_, keyEvent)) {
+        commitLiteralAndReset(keyEvent, *literal);
+        return;
+    }
+
     int chewingReturnValue = 0;
     if (keyEvent.key().check(FcitxKey_space)) {
-        chewingReturnValue = chewing_handle_Space(ctx);
+        if (*config_.SpaceCommitsCandidate && chewing_buffer_Check(ctx) &&
+            !(useFuzzyToneLayout(config_) && chewing_bopomofo_Check(ctx))) {
+            chewingReturnValue = chewing_handle_Enter(ctx);
+        } else {
+            chewingReturnValue = chewing_handle_Space(ctx);
+        }
     } else if (keyEvent.key().check(FcitxKey_Tab)) {
         chewingReturnValue = chewing_handle_Tab(ctx);
     } else if (keyEvent.key().isSimple()) {
@@ -623,10 +701,22 @@ void ChewingEngine::updatePreeditImpl(InputContext *ic) {
     }
     preedit.setCursor(rcur);
 
-    // insert zuin in the middle
-    preedit.append(std::string(text.substr(0, rcur)), format);
-    preedit.append(std::move(zuin), {TextFormatFlag::HighLight, format});
-    preedit.append(std::string(text.substr(rcur)), format);
+    if (zuin.empty() && !text.empty()) {
+        size_t begin = rcur;
+        if (cur < 0 || static_cast<size_t>(cur) >= len) {
+            begin = utf8::ncharByteLength(text.begin(), len - 1);
+        }
+        const auto end =
+            std::distance(text.begin(), utf8::nextChar(text.begin() + begin));
+        preedit.append(std::string(text.substr(0, begin)), format);
+        preedit.append(std::string(text.substr(begin, end - begin)),
+                       {TextFormatFlag::HighLight, format});
+        preedit.append(std::string(text.substr(end)), format);
+    } else {
+        preedit.append(std::string(text.substr(0, rcur)), format);
+        preedit.append(std::move(zuin), {TextFormatFlag::HighLight, format});
+        preedit.append(std::string(text.substr(rcur)), format);
+    }
 
     if (auto aux = safeChewing_aux_String(ctx); !aux.empty()) {
         ic->inputPanel().setAuxDown(Text(std::move(aux)));
