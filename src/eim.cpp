@@ -75,17 +75,17 @@ DEFINE_SAFE_CHEWING_STRING_GETTER(buffer);
 DEFINE_SAFE_CHEWING_STRING_GETTER(bopomofo);
 DEFINE_SAFE_CHEWING_STRING_GETTER(commit);
 
-bool hasControlLikeModifier(const Key &key) {
-    return key.states().test(KeyState::Ctrl) ||
-           key.states().test(KeyState::Alt) ||
-           key.states().test(KeyState::Super);
-}
-
 bool isAsciiPunctuation(uint32_t unicode) {
     return (unicode >= 0x21 && unicode <= 0x2f) ||
            (unicode >= 0x3a && unicode <= 0x40) ||
            (unicode >= 0x5b && unicode <= 0x60) ||
            (unicode >= 0x7b && unicode <= 0x7e);
+}
+
+bool isPinyinLayout(const ChewingConfig &config) {
+    return *config.Layout == ChewingLayout::HanYuPinYin ||
+           *config.Layout == ChewingLayout::ThlPinYin ||
+           *config.Layout == ChewingLayout::Mps2PinYin;
 }
 
 std::optional<char> literalCharForKey(const ChewingConfig &config,
@@ -95,20 +95,14 @@ std::optional<char> literalCharForKey(const ChewingConfig &config,
         return std::nullopt;
     }
 
-    const bool shiftPressed = keyEvent.rawKey().states().test(KeyState::Shift);
-    if (*config.ShiftLetterAsAscii && shiftPressed) {
-        if (key.isUAZ()) {
-            return static_cast<char>(Key::keySymToUnicode(key.sym()) - 'A' +
-                                     'a');
-        }
-        if (key.isLAZ()) {
-            return static_cast<char>(Key::keySymToUnicode(key.sym()));
-        }
+    const auto unicode = Key::keySymToUnicode(key.sym());
+    if (*config.ShiftLetterAsAscii && key.isUAZ()) {
+        return static_cast<char>(unicode);
     }
 
-    const auto unicode = Key::keySymToUnicode(key.sym());
-    if (*config.AsciiPunctuation && !hasControlLikeModifier(key) &&
-        isAsciiPunctuation(unicode)) {
+    if (*config.AsciiPunctuation &&
+        (isAsciiPunctuation(unicode) ||
+         (!isPinyinLayout(config) && (unicode == ' ' || key.isDigit())))) {
         return static_cast<char>(unicode);
     }
 
@@ -498,12 +492,9 @@ bool ChewingEngine::handleCandidateKeyEvent(const KeyEvent &keyEvent) const {
         }
         return true;
     }
-    if (keyEvent.key().check(FcitxKey_space)) {
-        if (*config_.SpaceCommitsCandidate && !candidateList->empty()) {
-            candidateList->candidate(0).select(ic);
-        } else {
-            candidateList->next();
-        }
+    if (keyEvent.key().check(FcitxKey_space) &&
+        *config_.SpaceCommitsCandidate && !candidateList->empty()) {
+        candidateList->candidate(0).select(ic);
         return true;
     }
     return false;
@@ -519,8 +510,11 @@ void ChewingEngine::commitLiteralAndReset(KeyEvent &keyEvent, char literal) {
         }
     }
     ic->commitString(std::string(1, literal));
+    chewing_cand_close(ctx);
+    chewing_clean_preedit_buf(ctx);
+    chewing_clean_bopomofo_buf(ctx);
     keyEvent.filterAndAccept();
-    doReset(keyEvent);
+    updateUI(ic);
 }
 
 void ChewingEngine::keyEvent(const InputMethodEntry &entry,
@@ -539,19 +533,12 @@ void ChewingEngine::keyEvent(const InputMethodEntry &entry,
         return;
     }
 
-    if (auto literal = literalCharForKey(config_, keyEvent)) {
+    int chewingReturnValue = 0;
+    if (keyEvent.key().check(FcitxKey_space) && chewing_bopomofo_Check(ctx)) {
+        chewingReturnValue = chewing_handle_Space(ctx);
+    } else if (auto literal = literalCharForKey(config_, keyEvent)) {
         commitLiteralAndReset(keyEvent, *literal);
         return;
-    }
-
-    int chewingReturnValue = 0;
-    if (keyEvent.key().check(FcitxKey_space)) {
-        if (*config_.SpaceCommitsCandidate && chewing_buffer_Check(ctx) &&
-            !(useFuzzyToneLayout(config_) && chewing_bopomofo_Check(ctx))) {
-            chewingReturnValue = chewing_handle_Enter(ctx);
-        } else {
-            chewingReturnValue = chewing_handle_Space(ctx);
-        }
     } else if (keyEvent.key().check(FcitxKey_Tab)) {
         chewingReturnValue = chewing_handle_Tab(ctx);
     } else if (keyEvent.key().isSimple()) {

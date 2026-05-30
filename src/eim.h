@@ -173,9 +173,9 @@ FCITX_CONFIGURATION(
     Option<bool> EasySymbolInput{this, "EasySymbolInput",
                                  _("Enable easy symbol"), false};
     Option<bool> AsciiPunctuation{this, "AsciiPunctuation",
-                                  _("Use ASCII punctuation"), false};
+                                  _("Use ASCII punctuation"), true};
     Option<bool> ShiftLetterAsAscii{this, "ShiftLetterAsAscii",
-                                    _("Use ASCII letters with Shift"), false};
+                                    _("Use ASCII letters with Shift"), true};
     Option<bool> SpaceCommitsCandidate{this, "SpaceCommitsCandidate",
                                        _("Commit first candidate with Space"),
                                        false};
